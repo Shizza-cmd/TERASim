@@ -1,0 +1,8 @@
+{
+  "client_root": "D:\\Games\\TERA-115.02\\Tera",
+  "account": "dev",
+  "http_port": 17801,
+  "game_host": "127.0.0.1",
+  "game_port": 7801,
+  "server_name": "Local"
+}
