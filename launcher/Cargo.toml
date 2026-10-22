@@ -3,6 +3,7 @@ name = "tera-launcher"
 version = "0.1.0"
 edition = "2021"
 description = "Minimal launcher for the TERA 115.02 client"
+license = "LGPL-3.0-or-later"
 
 [[bin]]
 name = "tera-launcher"
