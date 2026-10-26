@@ -1,0 +1,6 @@
+string name
+bytes ticket
+int32 unk1
+byte unk2
+uint32 language
+int32 patchVersion

@@ -4,5 +4,9 @@
   "http_port": 17801,
   "game_host": "127.0.0.1",
   "game_port": 7801,
-  "server_name": "Local"
+  "server_name": "Local",
+  "arbiter_http": "http://127.0.0.1:17802",
+  "screen_width": 1280,
+  "screen_height": 720,
+  "screen_mode": "window"
 }

@@ -1,3 +1,4 @@
+mod display;
 mod log_decrypt;
 mod protocol;
 
@@ -25,6 +26,7 @@ use windows::core::PCWSTR;
 use protocol::Session;
 
 const CLASS_NAME: &str = "EME.LauncherWnd";
+const WM_APP_QUIT: u32 = WM_USER + 1;
 
 static SESSION: OnceLock<Session> = OnceLock::new();
 
@@ -49,6 +51,14 @@ struct Config {
     game_port: u16,
     #[serde(default = "default_server_name")]
     server_name: String,
+    #[serde(default = "default_arbiter_http")]
+    arbiter_http: String,
+    #[serde(default = "default_screen_width")]
+    screen_width: u32,
+    #[serde(default = "default_screen_height")]
+    screen_height: u32,
+    #[serde(default = "default_screen_mode")]
+    screen_mode: String,
 }
 
 fn default_account() -> String {
@@ -66,6 +76,18 @@ fn default_game_port() -> u16 {
 fn default_server_name() -> String {
     "Local".into()
 }
+fn default_arbiter_http() -> String {
+    "http://127.0.0.1:17802".into()
+}
+fn default_screen_width() -> u32 {
+    1280
+}
+fn default_screen_height() -> u32 {
+    720
+}
+fn default_screen_mode() -> String {
+    "window".into()
+}
 
 fn main() {
     let config = match load_config() {
@@ -76,9 +98,26 @@ fn main() {
         }
     };
 
+    if let Err(err) = display::apply(
+        &config.client_root,
+        config.screen_width,
+        config.screen_height,
+        &config.screen_mode,
+    ) {
+        eprintln!("display: {err}");
+        exit(1);
+    }
+
     let server_list_url = format!("http://127.0.0.1:{}/servers", config.http_port);
     let xml = server_list_xml(&config);
-    let session = Session::new(config.account.clone(), server_list_url);
+    let ticket = match fetch_ticket(&config.arbiter_http, &config.account) {
+        Ok(ticket) => ticket,
+        Err(err) => {
+            eprintln!("ticket: {err}");
+            exit(1);
+        }
+    };
+    let session = Session::new(config.account.clone(), server_list_url, ticket);
     SESSION.set(session).ok();
 
     let xml_for_http = xml.clone();
@@ -153,11 +192,60 @@ fn xml_escape(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
+fn fetch_ticket(base: &str, account: &str) -> Result<String, String> {
+    let host = base
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    let mut stream = std::net::TcpStream::connect(host.as_str())
+        .map_err(|err| format!("{host}: {err}"))?;
+    let account = url_encode(account);
+    let request = format!(
+        "GET /tickets?account={account} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| err.to_string())?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|err| err.to_string())?;
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or(response.as_str());
+    let value: serde_json::Value =
+        serde_json::from_str(body.trim()).map_err(|err| format!("ticket response: {err}"))?;
+    value["ticket"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "ticket response has no ticket".into())
+}
+
+fn url_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 fn serve_http(port: u16, xml: &str) -> std::io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     println!("server list on http://127.0.0.1:{port}/servers");
     for stream in listener.incoming() {
-        let mut stream = stream?;
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("http accept: {err}");
+                continue;
+            }
+        };
         let mut buf = [0_u8; 2048];
         let _ = stream.read(&mut buf);
         println!("http request");
@@ -165,8 +253,12 @@ fn serve_http(port: u16, xml: &str) -> std::io::Result<()> {
             "HTTP/1.0 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             xml.len()
         );
-        stream.write_all(header.as_bytes())?;
-        stream.write_all(xml.as_bytes())?;
+        if let Err(err) = stream
+            .write_all(header.as_bytes())
+            .and_then(|_| stream.write_all(xml.as_bytes()))
+        {
+            eprintln!("http: {err}");
+        }
     }
     Ok(())
 }
@@ -272,6 +364,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             flush_replies(hwnd);
             LRESULT(0)
         }
+        msg if msg == WM_APP_QUIT => {
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
@@ -295,9 +391,17 @@ fn handle_copydata(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
 
     let reply = session.reply(copy.dwData, &text);
     if reply.quit {
-        thread::spawn(|| {
+        let window = hwnd.0 as isize;
+        thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
-            unsafe { PostQuitMessage(0) };
+            unsafe {
+                let _ = PostMessageW(
+                    Some(HWND(window as *mut _)),
+                    WM_APP_QUIT,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
         });
     }
 
@@ -342,6 +446,18 @@ fn flush_replies(hwnd: HWND) {
                 Some(LPARAM(&response as *const _ as isize)),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::url_encode;
+
+    #[test]
+    fn encodes_reserved_characters() {
+        assert_eq!(url_encode("dev"), "dev");
+        assert_eq!(url_encode("a b"), "a%20b");
+        assert_eq!(url_encode("a\"b&c"), "a%22b%26c");
     }
 }
 

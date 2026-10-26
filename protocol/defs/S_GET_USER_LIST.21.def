@@ -1,0 +1,14 @@
+# Empty list uses only the fields outside the character array.
+ref characters
+bool veteran
+int32 bonusBufSec
+int32 maxCharacters
+bool first
+bool more
+int32 leftDelTimeAccountOver
+int32 deletionSectionClassifyLevel
+int32 deleteCharacterExpireHour1
+int32 deleteCharacterExpireHour2
+array characters
+- uint32 id
+- string name

@@ -1,0 +1,17 @@
+[package]
+name = "tera-arbiter"
+version = "0.1.0"
+edition = "2021"
+description = "Login server for the TERA 115.02 client"
+license = "LGPL-3.0-or-later"
+
+[[bin]]
+name = "tera-arbiter"
+path = "src/main.rs"
+
+[dependencies]
+getrandom = "0.2"
+serde_json = "1"
+
+[build-dependencies]
+cc = "1"

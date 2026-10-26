@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use serde_json::{json, Value};
 
 const HELLO_ID: usize = 0x0DBADB0A;
@@ -18,15 +16,11 @@ pub struct Reply {
 }
 
 impl Session {
-    pub fn new(account: String, server_list_url: String) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+    pub fn new(account: String, server_list_url: String, ticket: String) -> Self {
         Self {
             account,
             server_list_url,
-            ticket: format!("{nanos:x}"),
+            ticket,
             last_server_id: 1,
         }
     }

@@ -1,0 +1,8 @@
+bool success
+bool loginQueue
+uint32 status
+uint32 unk
+uint32 language
+bool pvpDisabled
+uint16 unk1
+uint16 unk2
