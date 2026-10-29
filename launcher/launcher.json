@@ -1,12 +1,13 @@
 {
-  "client_root": "D:\\Games\\TERA-115.02\\Tera",
   "account": "dev",
-  "http_port": 17801,
+  "arbiter_http": "http://127.0.0.1:17802",
+  "client_exe": "D:\\Games\\TERA-115.02\\Tera\\Client\\Tl.exe",
+  "client_root": "D:\\Games\\TERA-115.02\\Tera",
   "game_host": "127.0.0.1",
   "game_port": 7801,
-  "server_name": "Local",
-  "arbiter_http": "http://127.0.0.1:17802",
-  "screen_width": 1280,
+  "http_port": 17801,
   "screen_height": 720,
-  "screen_mode": "window"
+  "screen_mode": "window",
+  "screen_width": 1280,
+  "server_name": "Local"
 }

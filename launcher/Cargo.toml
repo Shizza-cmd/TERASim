@@ -10,6 +10,7 @@ name = "tera-launcher"
 path = "src/main.rs"
 
 [dependencies]
+iced-x86 = "1.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 windows = { version = "0.61", features = [
@@ -17,7 +18,13 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }

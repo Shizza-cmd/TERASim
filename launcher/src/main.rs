@@ -1,12 +1,14 @@
 mod display;
 mod log_decrypt;
+mod patch;
 mod protocol;
 
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::exit;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -16,19 +18,34 @@ use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
+use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST};
+use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SendMessageW, TranslateMessage, CW_USEDEFAULT, MSG, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_COPYDATA, WM_DESTROY, WM_USER, WNDCLASSEXW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowTextW, MessageBoxW,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SendMessageW, SetWindowTextW, ShowWindow,
+    TranslateMessage, CW_USEDEFAULT, ES_AUTOHSCROLL, HMENU, MB_ICONERROR, MB_OK, MSG, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_COPYDATA, WM_DESTROY, WM_USER, WNDCLASSEXW,
+    WS_BORDER, WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE,
 };
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, PWSTR};
 
 use protocol::Session;
 
 const CLASS_NAME: &str = "EME.LauncherWnd";
 const WM_APP_QUIT: u32 = WM_USER + 1;
+const WM_APP_ENABLE: u32 = WM_USER + 2;
+const ID_BROWSE: u16 = 101;
+const ID_LAUNCH: u16 = 102;
 
 static SESSION: OnceLock<Session> = OnceLock::new();
+static CONFIG: OnceLock<Config> = OnceLock::new();
+static HTTP_STARTED: AtomicBool = AtomicBool::new(false);
+static LOGS_STARTED: AtomicBool = AtomicBool::new(false);
+static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+static PATH_HWND: AtomicIsize = AtomicIsize::new(0);
+static LAUNCH_HWND: AtomicIsize = AtomicIsize::new(0);
+static STATUS_HWND: AtomicIsize = AtomicIsize::new(0);
 
 struct PendingReply {
     target: isize,
@@ -38,9 +55,11 @@ struct PendingReply {
 
 static REPLIES: Mutex<Vec<PendingReply>> = Mutex::new(Vec::new());
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct Config {
     client_root: PathBuf,
+    #[serde(default)]
+    client_exe: PathBuf,
     #[serde(default = "default_account")]
     account: String,
     #[serde(default = "default_http_port")]
@@ -92,53 +111,27 @@ fn default_screen_mode() -> String {
 fn main() {
     let config = match load_config() {
         Ok(config) => config,
-        Err(err) => {
-            eprintln!("config: {err}");
-            exit(1);
-        }
+        Err(err) => fail(&format!("config: {err}")),
     };
-
-    if let Err(err) = display::apply(
-        &config.client_root,
-        config.screen_width,
-        config.screen_height,
-        &config.screen_mode,
-    ) {
-        eprintln!("display: {err}");
-        exit(1);
-    }
-
-    let server_list_url = format!("http://127.0.0.1:{}/servers", config.http_port);
-    let xml = server_list_xml(&config);
-    let ticket = match fetch_ticket(&config.arbiter_http, &config.account) {
-        Ok(ticket) => ticket,
-        Err(err) => {
-            eprintln!("ticket: {err}");
-            exit(1);
-        }
-    };
-    let session = Session::new(config.account.clone(), server_list_url, ticket);
-    SESSION.set(session).ok();
-
-    let xml_for_http = xml.clone();
-    let http_port = config.http_port;
-    thread::spawn(move || {
-        if let Err(err) = serve_http(http_port, &xml_for_http) {
-            eprintln!("http: {err}");
-        }
-    });
-
-    let log_dir = config
-        .client_root
-        .join("Client")
-        .join("S1Game")
-        .join("Logs");
-    thread::spawn(move || log_decrypt::watch(log_dir));
 
     if let Err(err) = run_window(&config) {
-        eprintln!("launcher: {err}");
-        exit(1);
+        fail(&format!("launcher: {err}"));
     }
+}
+
+fn fail(message: &str) -> ! {
+    eprintln!("{message}");
+    let text = wide(message);
+    let title = wide("TERASim");
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+    exit(1);
 }
 
 fn load_config() -> Result<Config, String> {
@@ -148,15 +141,32 @@ fn load_config() -> Result<Config, String> {
 }
 
 fn config_path() -> PathBuf {
+    let mut starts = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        starts.push(cwd);
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let beside = dir.join("launcher.json");
-            if beside.is_file() {
-                return beside;
-            }
+            starts.push(dir.to_path_buf());
+        }
+    }
+    for start in starts {
+        if let Some(path) = config_candidates(&start).into_iter().find(|path| path.is_file()) {
+            return path;
         }
     }
     PathBuf::from("launcher.json")
+}
+
+fn config_candidates(start: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        found.push(dir.join("launcher.json"));
+        found.push(dir.join("launcher").join("launcher.json"));
+        current = dir.parent();
+    }
+    found
 }
 
 fn server_list_xml(config: &Config) -> String {
@@ -283,16 +293,17 @@ fn run_window(config: &Config) -> Result<(), String> {
         ));
     }
 
+    let title = wide("TERASim");
     let hwnd = unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             PCWSTR(class_name.as_ptr()),
-            PCWSTR(class_name.as_ptr()),
-            WINDOW_STYLE::default(),
+            PCWSTR(title.as_ptr()),
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
+            640,
+            210,
             None,
             None,
             Some(instance.into()),
@@ -301,8 +312,43 @@ fn run_window(config: &Config) -> Result<(), String> {
     }
     .map_err(|err| err.to_string())?;
 
+    let path_box = child(
+        hwnd,
+        instance.into(),
+        "EDIT",
+        "",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+        16,
+        40,
+        470,
+        24,
+        100,
+    )?;
+    let _browse = child(hwnd, instance.into(), "BUTTON", "Обзор", button_style(), 496, 38, 112, 28, ID_BROWSE as isize)?;
+    let launch = child(hwnd, instance.into(), "BUTTON", "Запустить", button_style(), 16, 80, 140, 32, ID_LAUNCH as isize)?;
+    let status = child(
+        hwnd,
+        instance.into(),
+        "STATIC",
+        "Выберите файл клиента и нажмите «Запустить»",
+        WS_CHILD | WS_VISIBLE,
+        170,
+        86,
+        440,
+        40,
+        104,
+    )?;
+    let _label = child(hwnd, instance.into(), "STATIC", "Файл клиента", WS_CHILD | WS_VISIBLE, 16, 16, 200, 18, 105)?;
+    let initial = initial_exe(config);
+    set_text(path_box, &initial.display().to_string());
+
+    MAIN_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+    PATH_HWND.store(path_box.0 as isize, Ordering::Relaxed);
+    LAUNCH_HWND.store(launch.0 as isize, Ordering::Relaxed);
+    STATUS_HWND.store(status.0 as isize, Ordering::Relaxed);
+    let _ = CONFIG.set(config.clone());
     println!("window {CLASS_NAME} hwnd={hwnd:?}");
-    spawn_tl(config)?;
+    unsafe { let _ = ShowWindow(hwnd, SW_SHOW); };
 
     let mut msg = MSG::default();
     loop {
@@ -318,21 +364,158 @@ fn run_window(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_tl(config: &Config) -> Result<(), String> {
-    let tl = config.client_root.join("Client").join("Tl.exe");
-    let cwd = config.client_root.join("Client");
-    if !tl.is_file() {
-        return Err(format!("missing {}", tl.display()));
-    }
+fn button_style() -> WINDOW_STYLE {
+    WS_CHILD | WS_VISIBLE | WS_TABSTOP
+}
 
-    let mut application = wide(tl.to_str().ok_or("client path is not unicode")?);
-    let mut directory = wide(cwd.to_str().ok_or("client path is not unicode")?);
+fn child(
+    parent: HWND,
+    instance: windows::Win32::Foundation::HINSTANCE,
+    class: &str,
+    text: &str,
+    style: WINDOW_STYLE,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    id: isize,
+) -> Result<HWND, String> {
+    let class_name = wide(class);
+    let caption = wide(text);
+    unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            style,
+            x,
+            y,
+            width,
+            height,
+            Some(parent),
+            Some(HMENU(id as *mut _)),
+            Some(instance),
+            None,
+        )
+    }
+    .map_err(|err| err.to_string())
+}
+
+fn initial_exe(config: &Config) -> PathBuf {
+    if !config.client_exe.as_os_str().is_empty() {
+        config.client_exe.clone()
+    } else {
+        config.client_root.join("Client").join("Tl.exe")
+    }
+}
+
+fn client_root_from_exe(exe: &Path) -> PathBuf {
+    let mut current = exe.parent();
+    while let Some(dir) = current {
+        if dir.join("Client").join("S1Game").is_dir() {
+            return dir.to_path_buf();
+        }
+        if dir.file_name().is_some_and(|name| name == "Client") && dir.join("S1Game").is_dir() {
+            if let Some(root) = dir.parent() {
+                return root.to_path_buf();
+            }
+        }
+        current = dir.parent();
+    }
+    exe.parent().unwrap_or(exe).to_path_buf()
+}
+
+fn on_launch() {
+    let Some(config) = CONFIG.get() else {
+        return;
+    };
+    let exe = PathBuf::from(window_text(hwnd_of(&PATH_HWND)));
+    if !exe.is_file() {
+        set_status(&format!("нет файла {}", exe.display()));
+        return;
+    }
+    unsafe {
+        let _ = EnableWindow(hwnd_of(&LAUNCH_HWND), false);
+    }
+    let config = config.clone();
+    let config_path = config_path();
+    thread::spawn(move || {
+        if let Err(err) = launch(&config, &config_path, &exe) {
+            eprintln!("launch: {err}");
+            set_status(&err);
+            let main = MAIN_HWND.load(Ordering::Relaxed);
+            if main != 0 {
+                unsafe {
+                    let _ = PostMessageW(Some(HWND(main as *mut _)), WM_APP_ENABLE, WPARAM(0), LPARAM(0));
+                }
+            }
+        }
+    });
+}
+
+fn launch(config: &Config, config_path: &Path, exe: &Path) -> Result<(), String> {
+    let root = client_root_from_exe(exe);
+    set_status("Настраиваю окно клиента");
+    display::apply(&root, config.screen_width, config.screen_height, &config.screen_mode)?;
+
+    set_status("Беру билет");
+    ensure_session(config, &root)?;
+    let _ = remember_exe(config_path, exe);
+
+    set_status("Запускаю клиент");
+    let before = patch::pids("TERA.exe");
+    let _pid = start_process(exe)?;
+    set_status("Жду распаковку TERA.exe");
+    let game = patch::wait_for_new("TERA.exe", &before, Duration::from_secs(120))?;
+    set_status("Ставлю патч");
+    patch::arm(game)?;
+    set_status("Патч установлен. «Новый персонаж» откроет выбор расы.");
+    println!("patched TERA.exe pid {game}");
+    Ok(())
+}
+
+fn ensure_session(config: &Config, root: &Path) -> Result<(), String> {
+    if SESSION.get().is_some() {
+        return Ok(());
+    }
+    let server_list_url = format!("http://127.0.0.1:{}/servers", config.http_port);
+    let ticket = fetch_ticket(&config.arbiter_http, &config.account)?;
+    let session = Session::new(config.account.clone(), server_list_url, ticket);
+    SESSION.set(session).ok();
+
+    let xml = server_list_xml(config);
+    let http_port = config.http_port;
+    if !HTTP_STARTED.swap(true, Ordering::SeqCst) {
+        thread::spawn(move || {
+            if let Err(err) = serve_http(http_port, &xml) {
+                eprintln!("http: {err}");
+            }
+        });
+    }
+    let log_dir = root.join("Client").join("S1Game").join("Logs");
+    if !LOGS_STARTED.swap(true, Ordering::SeqCst) {
+        thread::spawn(move || log_decrypt::watch(log_dir));
+    }
+    Ok(())
+}
+
+fn remember_exe(path: &Path, exe: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    let mut value: serde_json::Value = serde_json::from_str(&text).map_err(|err| err.to_string())?;
+    value["client_exe"] = serde_json::Value::String(exe.display().to_string());
+    let pretty = serde_json::to_string_pretty(&value).map_err(|err| err.to_string())?;
+    fs::write(path, pretty + "\n").map_err(|err| err.to_string())
+}
+
+fn start_process(exe: &Path) -> Result<u32, String> {
+    let cwd = exe.parent().ok_or("у файла клиента нет папки")?;
+    let mut application = wide(exe.to_str().ok_or("путь клиента не unicode")?);
+    let mut directory = wide(cwd.to_str().ok_or("путь клиента не unicode")?);
     let startup = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         ..Default::default()
     };
     let mut process = PROCESS_INFORMATION::default();
-
     unsafe {
         CreateProcessW(
             PCWSTR(application.as_mut_ptr()),
@@ -347,21 +530,96 @@ fn spawn_tl(config: &Config) -> Result<(), String> {
             &mut process,
         )
     }
-    .map_err(|err| format!("CreateProcess {}: {err}", tl.display()))?;
-
-    println!("started {}", tl.display());
+    .map_err(|err| format!("запуск {}: {err}", exe.display()))?;
+    let pid = process.dwProcessId;
+    println!("started {} pid {pid}", exe.display());
     unsafe {
         let _ = CloseHandle(process.hProcess);
         let _ = CloseHandle(process.hThread);
     }
-    Ok(())
+    Ok(pid)
+}
+
+fn browse(owner: HWND) {
+    let current = window_text(hwnd_of(&PATH_HWND));
+    let mut file = [0u16; 520];
+    for (index, unit) in current.encode_utf16().take(file.len() - 1).enumerate() {
+        file[index] = unit;
+    }
+    let filter = wide_units("Executable\0*.exe\0\0");
+    let title = wide("Файл клиента");
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(file.as_mut_ptr()),
+        nMaxFile: file.len() as u32,
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
+        ..OPENFILENAMEW::default()
+    };
+    let picked = unsafe { GetOpenFileNameW(&mut dialog) };
+    if picked.as_bool() {
+        let end = file.iter().position(|unit| *unit == 0).unwrap_or(file.len());
+        set_text(hwnd_of(&PATH_HWND), &String::from_utf16_lossy(&file[..end]));
+    }
+}
+
+fn window_text(hwnd: HWND) -> String {
+    let mut buf = [0u16; 1024];
+    let count = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if count <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..count as usize])
+}
+
+fn set_text(hwnd: HWND, text: &str) {
+    let wide = wide(text);
+    unsafe {
+        let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
+    }
+}
+
+fn set_status(text: &str) {
+    println!("{text}");
+    let hwnd = hwnd_of(&STATUS_HWND);
+    if !hwnd.0.is_null() {
+        set_text(hwnd, text);
+    }
+}
+
+fn hwnd_of(slot: &AtomicIsize) -> HWND {
+    HWND(slot.load(Ordering::Relaxed) as *mut _)
+}
+
+fn wide_units(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_COPYDATA => handle_copydata(hwnd, wparam, lparam),
+        WM_COMMAND => {
+            let id = (wparam.0 & 0xffff) as u16;
+            let note = ((wparam.0 >> 16) & 0xffff) as u16;
+            if note == 0 {
+                match id {
+                    ID_BROWSE => browse(hwnd),
+                    ID_LAUNCH => on_launch(),
+                    _ => {}
+                }
+            }
+            LRESULT(0)
+        }
         msg if msg == WM_USER => {
             flush_replies(hwnd);
+            LRESULT(0)
+        }
+        msg if msg == WM_APP_ENABLE => {
+            unsafe {
+                let _ = EnableWindow(hwnd_of(&LAUNCH_HWND), true);
+            }
             LRESULT(0)
         }
         msg if msg == WM_APP_QUIT => {
@@ -451,13 +709,40 @@ fn flush_replies(hwnd: HWND) {
 
 #[cfg(test)]
 mod tests {
-    use super::url_encode;
+    use super::{client_root_from_exe, config_candidates, url_encode};
+    use std::fs;
 
     #[test]
     fn encodes_reserved_characters() {
         assert_eq!(url_encode("dev"), "dev");
         assert_eq!(url_encode("a b"), "a%20b");
         assert_eq!(url_encode("a\"b&c"), "a%22b%26c");
+    }
+
+    #[test]
+    fn client_root_is_the_directory_above_client() {
+        let root = std::env::temp_dir().join(format!("terasim-root-{}", std::process::id()));
+        let client = root.join("Client");
+        fs::create_dir_all(client.join("S1Game")).unwrap();
+        fs::create_dir_all(client.join("Binaries")).unwrap();
+        let tera = client.join("Binaries").join("TERA.exe");
+        let tl = client.join("Tl.exe");
+        assert_eq!(client_root_from_exe(&tera), root);
+        assert_eq!(client_root_from_exe(&tl), root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn config_search_climbs_to_the_launcher_folder() {
+        let root = std::env::temp_dir().join(format!("terasim-cfg-{}", std::process::id()));
+        let debug = root.join("target").join("debug");
+        fs::create_dir_all(&debug).unwrap();
+        fs::create_dir_all(root.join("launcher")).unwrap();
+        let expected = root.join("launcher").join("launcher.json");
+        fs::write(&expected, "{}").unwrap();
+        let hit = config_candidates(&debug).into_iter().find(|path| path.is_file());
+        assert_eq!(hit.as_deref(), Some(expected.as_path()));
+        let _ = fs::remove_dir_all(&root);
     }
 }
 
