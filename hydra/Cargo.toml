@@ -1,0 +1,9 @@
+[package]
+name = "hydra"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-pass x64 scanner: immediates, references, and packet build sites"
+license = "LGPL-3.0-or-later"
+
+[dependencies]
+iced-x86 = "1.21"
