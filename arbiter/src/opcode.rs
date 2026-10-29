@@ -31,6 +31,10 @@ impl Opcodes {
         self.by_name.get(name).copied()
     }
 
+    pub fn has(&self, code: u16) -> bool {
+        self.by_code.contains_key(&code)
+    }
+
     pub fn name(&self, code: u16) -> String {
         self.by_code
             .get(&code)

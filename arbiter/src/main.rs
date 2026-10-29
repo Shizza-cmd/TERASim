@@ -1,3 +1,4 @@
+mod characters;
 mod crypt;
 mod opcode;
 mod packets;
@@ -9,6 +10,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
 
+use characters::Roster;
 use opcode::Opcodes;
 use tickets::Tickets;
 
@@ -18,6 +20,7 @@ const TICKET_PORT: u16 = 17802;
 fn main() {
     let opcodes = Opcodes::load();
     let tickets = Arc::new(Tickets::load());
+    let characters = Arc::new(Roster::load());
     let http_tickets = Arc::clone(&tickets);
 
     thread::spawn(move || {
@@ -40,7 +43,8 @@ fn main() {
         };
         let opcodes = opcodes.clone();
         let tickets = Arc::clone(&tickets);
-        thread::spawn(move || session::handle(stream, opcodes, tickets));
+        let characters = Arc::clone(&characters);
+        thread::spawn(move || session::handle(stream, opcodes, tickets, characters));
     }
 }
 
