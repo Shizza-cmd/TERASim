@@ -11,7 +11,7 @@ SHELL := sh
 
 ROOT := $(subst \,/,$(CURDIR))
 BIN  := $(ROOT)/target/debug
-STOP_CMD = powershell.exe -NoProfile -Command '$$exe = [IO.Path]::GetFullPath("$(BIN)/tera-arbiter.exe"); if (Test-Path "$(ROOT)/.arbiter.pid") { $$id = [IO.File]::ReadAllText("$(ROOT)/.arbiter.pid").Trim(); if ($$id) { Stop-Process -Id $$id -Force -ErrorAction SilentlyContinue }; Remove-Item "$(ROOT)/.arbiter.pid" -Force -ErrorAction SilentlyContinue }; Get-Process tera-arbiter -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and ([IO.Path]::GetFullPath($$_.Path) -eq $$exe) } | Stop-Process -Force -ErrorAction SilentlyContinue'
+STOP_CMD = powershell.exe -NoProfile -Command '$$exe = [IO.Path]::GetFullPath("$(BIN)/tera-arbiter.exe"); if (Test-Path "$(ROOT)/.arbiter.pid") { $$id = [IO.File]::ReadAllText("$(ROOT)/.arbiter.pid").Trim(); if ($$id) { Stop-Process -Id $$id -Force -ErrorAction SilentlyContinue }; Remove-Item "$(ROOT)/.arbiter.pid" -Force -ErrorAction SilentlyContinue }; Get-Process -ErrorAction SilentlyContinue | Where-Object { $$_.ProcessName -eq "tera-arbiter" -and $$_.Path -and ([IO.Path]::GetFullPath($$_.Path) -eq $$exe) } | Stop-Process -Force -ErrorAction SilentlyContinue; exit 0'
 
 .PHONY: help build release serve run stop arbiter launcher clean
 
@@ -32,6 +32,7 @@ release:
 	cargo build --workspace --release
 
 arbiter:
+	@$(STOP_CMD)
 	cargo run -p tera-arbiter
 
 launcher:
