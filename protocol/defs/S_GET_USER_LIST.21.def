@@ -9,6 +9,26 @@ int32 leftDelTimeAccountOver
 int32 deletionSectionClassifyLevel
 int32 deleteCharacterExpireHour1
 int32 deleteCharacterExpireHour2
+# Each element begins with uint16 here and uint16 next (next is 0 on the last).
+# here of the first element equals the characters offset. Offsets are from
+# the start of the packet. The fixed record after the refs is 456 bytes:
+# id, lobby gender (1 female, 2 male), race, class, level, then appearance
+# at byte 117 of that record, isNewCharacter at 409, position at 427.
 array characters
+- ref customStrings
+- ref name
+- ref details
+- ref shape
+- ref guildName
 - uint32 id
+- int32 gender
+- int32 race
+- int32 class
+- int32 level
+- byte[8] appearance
+- bool isNewCharacter
+- int32 position
 - string name
+- bytes details
+- bytes shape
+- string guildName
