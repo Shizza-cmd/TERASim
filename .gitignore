@@ -1,5 +1,6 @@
 /target/
 /launcher/target/
+/tera-launcher.exe
 
 # Local helpers and scratch. Not part of the server.
 /scripts/
