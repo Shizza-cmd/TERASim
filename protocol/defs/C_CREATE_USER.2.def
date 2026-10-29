@@ -1,0 +1,15 @@
+# Offsets are absolute from the start of the packet, including the 4-byte header.
+# gender: 0 male, 1 female
+# race: 0 human, 1 high elf, 2 aman, 3 castanic, 4 popori/elin, 5 baraka
+# class: 0 warrior, 1 lancer, 2 slayer, 3 berserker, 4 sorcerer, 5 archer,
+#        6 priest, 7 mystic, 8 reaper, 9 gunner, 10 brawler, 11 ninja, 12 valkyrie
+string name
+bytes details
+bytes shape
+int32 gender
+int32 race
+int32 class
+byte[8] appearance
+bool isSecondCharacter
+uint32 appearance2
+bool isRandomName
